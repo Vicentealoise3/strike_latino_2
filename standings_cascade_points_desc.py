@@ -12,9 +12,11 @@ API = "https://mlb25.theshow.com/apis/game_history.json"
 PLATFORM = "psn"
 MODE = "LEAGUE"
 SINCE = datetime(2025, 8, 30)
-PAGES = (1, 2)          # <-- SOLO p1 y p2, como validaste
+SCHEDULED_GAMES = 13  # <--- NUEVO: total de juegos programados
+PAGES = (1, 2)
 TIMEOUT = 20
 RETRIES = 2
+
 
 # Mostrar detalle por equipo (línea a línea). Deja False para tabla limpia.
 PRINT_DETAILS = False
@@ -174,9 +176,9 @@ def compute_team_record_for_user(username_exact: str, team_name: str):
     wins_adj, losses_adj = wins + adj_w, losses + adj_l
 
     # 5) Puntos y métricas de tabla
-    scheduled = 12
-    played = max(wins_adj + losses_adj, 0)
-    remaining = max(scheduled - played, 0)
+scheduled = SCHEDULED_GAMES
+played = max(wins_adj + losses_adj, 0)
+remaining = max(scheduled - played, 0)
     points_base = 3 * wins_adj + 2 * losses_adj
 
     # 6) Ajuste manual de PUNTOS (desconexiones, sanciones, etc.)
@@ -215,7 +217,7 @@ def main():
 
     # Print tabla con posiciones
     print("\nTabla de posiciones")
-    print("Pos | Equipo            | Jugador         | Prog |  JJ |  W |  L | P.Jugar | Pts")
+    print("Pos | Equipo            | Jugador         |  Prog({SCHEDULED_GAMES} |  JJ |  W |  L | P.Jugar | Pts")
     print("----+-------------------+-----------------+------+-----+----+----+---------+----")
     for pos, r in enumerate(rows, start=1):
         print(f"{pos:>3} | {r['team']:<19} | {r['user']:<15} | {r['scheduled']:>4} | {r['played']:>3} | "
