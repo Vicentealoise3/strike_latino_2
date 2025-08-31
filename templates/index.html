@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Tabla de posiciones – Liga MLB The Show 25</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+<body>
+  <main class="container">
+    <header class="header">
+      <h1>Tabla de posiciones</h1>
+      <div class="meta">Última actualización: {{ last_updated }}</div>
+      <button class="refresh" onclick="location.reload()">Actualizar</button>
+    </header>
+
+    {% if games_today and games_today|length > 0 %}
+    <section class="today">
+      <h2>Juegos jugados hoy</h2>
+      <ol>
+        {% for line in games_today %}
+          <li>{{ loop.index }}- {{ line }}</li>
+        {% endfor %}
+      </ol>
+    </section>
+    {% endif %}
+
+    <section class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th title="Posición">#</th>
+            <th title="Nombre del equipo">Equipo</th>
+            <th title="Usuario/participante">Jugador</th>
+
+            <!-- Orden y nombres que usamos en el servidor -->
+            <th title="Juegos programados para cada equipo">Prog({{ scheduled }})</th>
+            <th title="JJ = W + L">JJ</th>
+            <th title="Juegos ganados">W</th>
+            <th title="Juegos perdidos">L</th>
+            <th title="Juegos que faltan por disputar">Por jugar</th>
+            <th title="Puntuación total de la liga">Pts</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for r in rows %}
+            <tr>
+              <td class="num mono strong">{{ loop.index }}</td>
+              <td class="strong">{{ r.team }}</td>
+              <td class="mono">{{ r.display_user }}</td>
+
+              <!-- Valores EXACTAMENTE en el mismo orden que los encabezados -->
+              <td class="num mono">{{ r.scheduled }}</td>
+              <td class="num mono">{{ r.played }}</td>
+              <td class="num mono strong">{{ r.wins }}</td>
+              <td class="num mono">{{ r.losses }}</td>
+              <td class="num mono">{{ r.remaining }}</td>
+              <td class="num mono strong">{{ r.points }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </section>
+
+    {% if notes and notes|length > 0 %}
+    <section class="notes">
+      <h2>Notas de puntos</h2>
+      <ul>
+        {% for r in notes %}
+          <li>
+            <strong>{{ r.team }}</strong>:
+            {% if r.points_extra > 0 %}+{% endif %}{{ r.points_extra }} — {{ r.points_reason }}
+          </li>
+        {% endfor %}
+      </ul>
+    </section>
+    {% endif %}
+
+    <footer class="footer">© {{ last_updated[:4] }} Liga MLB The Show 25</footer>
+  </main>
+</body>
+</html>
