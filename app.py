@@ -11,7 +11,7 @@ app = Flask(__name__)
 # =========================
 # Config
 # =========================
-SCHEDULED_GAMES = 12  # Prog(12)
+SCHEDULED_GAMES = 13  # Prog(13)
 
 USER_ALIASES = {
     "airamreynoso_": "Yosoyreynoso_",
