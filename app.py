@@ -30,87 +30,85 @@ def _first_attr(mod, names):
 def _normalize(s: str) -> str:
     return (s or "").strip().lower()
 
-def _pick_user_field(row: dict) -> str:
-    for key in ("display_user", "user_exact", "user", "username", "player", "manager"):
-        v = row.get(key)
-        if v:
-            return str(v)
-    return ""
+# =========================
+# Cache
+# =========================
+_cache = {"rows": None, "notes": None, "ts": 0}
+_today_cache = {"items": [], "ts": 0}
 
-def _apply_alias_and_metrics(row: dict) -> dict:
-    # --- usuario / alias ---
-    user_raw = _pick_user_field(row)
-    norm = _normalize(user_raw)
-    display_user = USER_ALIASES.get(norm, user_raw or "")
-    row["display_user"] = display_user
-    if not row.get("user_exact"):
-        row["user_exact"] = display_user
+_cache_ttl = 60  # 1 minuto
+_today_cache_ttl = 30  # 30 segundos
 
-    # --- métricas alineadas con encabezados ---
-    def _as_int(x, default=0):
-        try:
-            return int(x)
-        except Exception:
-            return default
+# =========================
+# Adaptadores / Normalización de filas
+# =========================
+def normalize_rows(rows_raw):
+    """
+    Normaliza filas para la tabla (alinear con encabezados).
+    Espera dicts con: team, user_exact, wins, losses, played, remaining, points, points_extra, points_reason
+    """
+    rows = []
+    for r in rows_raw:
+        row = dict(r)
+        # mostrar alias en display_user
+        user_raw = row.get("user_exact") or ""
+        norm = _normalize(user_raw)
+        display_user = USER_ALIASES.get(norm, user_raw or "")
+        row["display_user"] = display_user
+        if not row.get("user_exact"):
+            row["user_exact"] = display_user
 
-    wins = _as_int(row.get("wins", 0))
-    losses = _as_int(row.get("losses", 0))
-    played = wins + losses
-    remaining = max(SCHEDULED_GAMES - played, 0)
+        # --- métricas alineadas con encabezados ---
+        def _as_int(x, default=0):
+            try:
+                return int(x)
+            except Exception:
+                return default
 
-    row["wins"] = wins
-    row["losses"] = losses
-    row["played"] = played
-    row["remaining"] = remaining
-    row["points"] = _as_int(row.get("points", 0))
-    row["scheduled"] = SCHEDULED_GAMES
+        wins = _as_int(row.get("wins", 0))
+        losses = _as_int(row.get("losses", 0))
+        played = wins + losses
+        row["wins"] = wins
+        row["losses"] = losses
+        row["played"] = played
 
-    if "team" in row:
-        row["team"] = str(row["team"])
+        # remaining: usa valor del módulo si lo trae, si no, calcula con SCHEDULED_GAMES
+        remaining = row.get("remaining")
+        if remaining is None:
+            remaining = max(SCHEDULED_GAMES - played, 0)
+        row["remaining"] = remaining
 
-    return row
+        # points
+        row["points"] = _as_int(row.get("points", 0))
 
-def _build_rows_robusto():
-    compute_all = _first_attr(scpd, [
-        "compute_rows",
-        "compute_all_rows",
-        "build_rows",
-        "compute_standings",
-    ])
-    if compute_all:
-        rows = compute_all()
-    else:
-        func = _first_attr(scpd, [
-            "compute_team_record_for_user",
-            "compute_team_record",
-            "compute_row_for_user",
-            "build_team_row",
-            "team_row_for_user",
-        ])
-        if not func:
-            raise RuntimeError(
-                "No encontré una función para construir filas. "
-                "Define compute_rows() o compute_team_record_for_user(user, team)."
-            )
-        if not hasattr(scpd, "LEAGUE_ORDER"):
-            raise RuntimeError("LEAGUE_ORDER no existe en standings module")
+        # Extras (para notas)
+        row["points_extra"] = _as_int(row.get("points_extra", 0))
+        row["points_reason"] = row.get("points_reason", "")
 
-        rows = [func(u, t) for (u, t) in scpd.LEAGUE_ORDER]
+        rows.append(row)
 
-    rows = [_apply_alias_and_metrics(dict(r)) for r in rows]
-
+    # Orden por puntos desc, wins desc, losses asc
     rows.sort(key=lambda r: (-r.get("points", 0), -r.get("wins", 0), r.get("losses", 0)))
+    return rows
 
-    notes = []
+def build_notes(rows):
+    """
+    Construye notas de ajustes de puntos para el recuadro inferior.
+    """
+    out = []
     for r in rows:
-        if r.get("points_extra"):
-            notes.append({
+        extra = int(r.get("points_extra", 0) or 0)
+        if extra != 0:
+            out.append({
                 "team": r.get("team", ""),
-                "points_extra": int(r.get("points_extra", 0)),
+                "points_extra": extra,
                 "points_reason": r.get("points_reason", ""),
             })
-    return rows, notes
+    return out
 
+# =========================
+# “Juegos de hoy” – fallback si el módulo no expone games_played_today_scl()
+# =========================
 def _games_played_today_scl_safe():
     try:
         from zoneinfo import ZoneInfo
@@ -145,7 +143,7 @@ def _games_played_today_scl_safe():
         if not d:
             continue
         if d.tzinfo is None:
-            d = d.replace(tzinfo=ZoneInfo("UTC"))
+            d = d.replace(tzinfo=tz_utc)
         d_local = d.astimezone(tz_scl)
         if d_local.date() != today_local:
             continue
@@ -166,8 +164,9 @@ def _games_played_today_scl_safe():
         hr = str(g.get("home_runs") or "0")
         ar = str(g.get("away_runs") or "0")
 
-        minute_key = d_local.strftime("%Y-%m-%d %H:%M")
-        canon_key = (home, away, hr, ar, minute_key)
+        # *** DEDUP POR DÍA (sin minutos) ***
+        date_key = d_local.date()
+        canon_key = (home, away, hr, ar, date_key)
         if canon_key in seen_keys:
             continue
 
@@ -186,21 +185,18 @@ def _games_played_today_scl_safe():
     return [s for _, s in items]
 
 # =========================
-# Cache
+# Caches
 # =========================
-CACHE_TTL = 120
-_today_cache_ttl = 60
-
-_cache = {"ts": 0, "rows": [], "notes": []}
-_today_cache = {"ts": 0, "items": []}
-
 def get_rows_cached():
     now = time.time()
-    if now - _cache["ts"] > CACHE_TTL or not _cache["rows"]:
+    if now - _cache["ts"] > _cache_ttl:
         try:
-            rows, notes = _build_rows_robusto()
+            mod_func = _first_attr(scpd, ["compute_rows", "build_rows", "rows"])
+            raw = mod_func() if callable(mod_func) else scpd.compute_rows()
+            rows = normalize_rows(raw)
+            notes = build_notes(rows)
         except Exception as e:
-            print("[ERROR] Construyendo filas:", e)
+            print("[ERROR] compute_rows:", e)
             traceback.print_exc()
             rows, notes = [], []
         _cache["rows"] = rows
@@ -233,29 +229,18 @@ def index():
         rows=rows,
         notes=notes,
         games_today=games_today,
-        scheduled=SCHEDULED_GAMES,
         last_updated=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        scheduled=SCHEDULED_GAMES,
     )
 
-@app.get("/api/standings")
-def api_standings():
-    rows, notes = get_rows_cached()
-    return jsonify({
-        "last_updated": datetime.now().isoformat(timespec="seconds"),
-        "rows": rows,
-        "notes": notes,
-        "scheduled": SCHEDULED_GAMES,
-    })
-
-@app.get("/api/preview_rowmap")
-def api_preview_rowmap():
-    """Devuelve la vista exacta que usa la tabla, para comparar encabezados vs datos."""
+@app.get("/api/sample")
+def api_sample():
     rows, _ = get_rows_cached()
-    sample = rows[:5]
+    sample = rows[:10]
     view = [{
-        "team": r.get("team"),
-        "display_user": r.get("display_user"),
-        "scheduled": r.get("scheduled"),
+        "team": r.get("team", ""),
+        "user": r.get("display_user", r.get("user_exact", "")),
+        "scheduled": SCHEDULED_GAMES,
         "played": r.get("played"),
         "wins": r.get("wins"),
         "losses": r.get("losses"),
