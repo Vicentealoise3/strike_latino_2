@@ -1,189 +1,217 @@
-# standings_cascade_points.py
-# Tabla de posiciones (2 páginas por jugador) con columnas:
-# Pos | Equipo | Jugador | Prog(12) | JJ | W | L | Por jugar | Pts
-# Reglas: LEAGUE + fecha, filtro (ambos miembros) o (CPU + miembro), dedup por id, ajustes algebraicos.
-# Orden: por puntos (desc). Empates: por W (desc), luego L (asc).
+# standings_cascade_points_desc.py
+# -----------------------------------------------------------------------------
+# Construye la tabla de posiciones a partir del historial de juegos de la API
+# de MLB The Show 25, filtrando por modo LEAGUE, fechas, y mapeando usuarios/
+# equipos definidos en LEAGUE_ORDER. Pensado para ser importado desde app.py
+# (Render/Flask) y también ejecutable por consola para debug.
+#
+# Columnas impresas:
+# Pos | Equipo | Jugador | Prog(SCHEDULED_GAMES) |  JJ |  W |  L | P.Jugar | Pts
+# -----------------------------------------------------------------------------
 
-import requests, time, re
+from __future__ import annotations
+
+import json
+import time
 from datetime import datetime
+from typing import Dict, List, Tuple, Any, Set
 
-# ===== Config general =====
+import requests
+
+# ===== Config general =========================================================
 API = "https://mlb25.theshow.com/apis/game_history.json"
 PLATFORM = "psn"
 MODE = "LEAGUE"
+
+# FECHA mínima a considerar (juegos anteriores se ignoran)
 SINCE = datetime(2025, 8, 30)
-SCHEDULED_GAMES = 13  # <--- NUEVO: total de juegos programados
+
+# NUEVO: total de juegos programados por equipo
+SCHEDULED_GAMES = 12
+
+# Páginas a pedir (por cada usuario)
 PAGES = (1, 2)
+
+# Red de peticiones
 TIMEOUT = 20
 RETRIES = 2
+SLEEP_BETWEEN = 0.3  # descanso suave entre requests
 
-
-# Mostrar detalle por equipo (línea a línea). Deja False para tabla limpia.
-PRINT_DETAILS = False
-
-# Procesar solo los primeros N para ir validando en cascada (None = todos)
-STOP_AFTER_N = None
-
-# ===== Liga (username EXACTO → equipo) =====
-LEAGUE_ORDER = [
-    ("THELSURICATO", "Mets"),
-    ("machado_seba-03", "Reds"),
-    ("zancudo99", "Rangers"),
-    ("vicentealoise", "Brewers"),
-    ("Solbracho", "Tigers"),
-    ("WILZULIA", "Royals"),
-    ("Daviddiaz030425", "Guardians"),
-    ("Juanchojs28", "Giants"),
-    ("Dev Read", "Marlins"),
-    ("Bufon3-0", "Athletics"),
-    ("edwar13-21", "Blue Jays"),
-    ("mrguerrillas", "Pirates"),
-    ("Diamondmanager", "Astros"),
-    ("Tu_Pauta2000", "Braves"),
+# ===== Liga (RELLENAR con tu liga actual) ====================================
+# IMPORTANTE: Rellena LEAGUE_ORDER con tu mapeo (usuario PSN, Equipo MLB)
+# Ejemplos de formato, borra/edita a tu gusto:
+LEAGUE_ORDER: List[Tuple[str, str]] = [
+    # ("usuario1", "Astros"),
+    # ("usuario2", "Rays"),
+    # ...
 ]
 
-# ===== Ajustes algebraicos por equipo (resets W/L) =====
-TEAM_RECORD_ADJUSTMENTS = {
-      #  "Phillies": (-1, 0),
-        #"Padres": (-1, 0),
-        #"Blue Jays": (0, -1),
-    # agrega más si hace falta
-}
+# Aliases opcionales para normalizar jugadores con variación de nombre
+# (Por ejemplo: {"AiramReynoso_", "Yosoyreynoso_"} si aplica en ESTA liga)
+EXTRA_ALIASES: Set[str] = set()
+# Si necesitas activar el alias clásico de tus otras ligas, quita el comentario:
+# EXTRA_ALIASES.update({"AiramReynoso_", "Yosoyreynoso_"})
 
-# ===== Ajustes manuales de PUNTOS (desconexiones, sanciones, bonificaciones) =====
-# Formato: "Equipo": (ajuste_en_puntos, "razón del ajuste")
-TEAM_POINT_ADJUSTMENTS = {
-        #"Padres": (-1, "Desconexión vs Blue Jays"),
-    # ejemplo de bonificación futura:
-    # "Cubs": (+1, "Bonificación fair play"),
-}
+# ===== Derivados de liga (NO TOCAR si no sabes qué haces) ====================
+LEAGUE_USERS: Set[str] = {u for (u, _t) in LEAGUE_ORDER}
+if EXTRA_ALIASES:
+    LEAGUE_USERS.update(EXTRA_ALIASES)
 
-# ===== Miembros de liga (para el filtro de rival) =====
-LEAGUE_USERS = {u for (u, _t) in LEAGUE_ORDER}
-# Agrega alias/equivalencias si corresponde a esta liga:
-LEAGUE_USERS.update({"AiramReynoso_", "Yosoyreynoso_"})
-
-LEAGUE_USERS_NORM = {u.lower() for u in LEAGUE_USERS}
+LEAGUE_USERS_NORM: Set[str] = {u.lower() for u in LEAGUE_USERS}
+TEAM_BY_USER: Dict[str, str] = {u: t for (u, t) in LEAGUE_ORDER}
+USER_BY_TEAM: Dict[str, str] = {t: u for (u, t) in LEAGUE_ORDER}
 
 
-# ===== Utilidades =====
-BXX_RE = re.compile(r"\^(b\d+)\^", flags=re.IGNORECASE)
+# ===== Utilidades =============================================================
+def _safe_int(x: Any, default: int = 0) -> int:
+    try:
+        return int(x)
+    except Exception:
+        return default
 
-def normalize_user_for_compare(raw: str) -> str:
-    if not raw: return ""
-    return BXX_RE.sub("", raw).strip().lower()
 
-LEAGUE_USERS_NORM = {u.lower() for u in LEAGUE_USERS}
+def _parse_api_date(display_date: str) -> datetime | None:
+    # ejemplo: "08/14/2025 02:30:59"
+    try:
+        return datetime.strptime(display_date, "%m/%d/%Y %H:%M:%S")
+    except Exception:
+        return None
 
-def is_cpu(raw: str) -> bool:
-    return normalize_user_for_compare(raw) == "cpu"
 
-def parse_date(s: str):
-    for fmt in ("%m/%d/%Y %H:%M:%S", "%m/%d/%Y %H:%M"):
-        try:
-            return datetime.strptime(s, fmt)
-        except:
-            pass
-    return None
-
-def fetch_page(username: str, page: int):
-    params = {"username": username, "platform": PLATFORM, "page": page}
-    last = None
+def _req(url: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    last_err = None
     for _ in range(RETRIES):
         try:
-            r = requests.get(API, params=params, timeout=TIMEOUT)
-            r.raise_for_status()
-            return (r.json() or {}).get("game_history") or []
+            r = requests.get(url, params=params, timeout=TIMEOUT)
+            if r.status_code == 200:
+                return r.json()
+            last_err = f"HTTP {r.status_code} - {r.text[:200]}"
         except Exception as e:
-            last = e
-            time.sleep(0.4)
-    print(f"[WARN] {username} p{page} sin datos ({last})")
-    return []
+            last_err = str(e)
+        time.sleep(SLEEP_BETWEEN)
+    raise RuntimeError(f"Fallo request {url} params={params}. Ultimo error: {last_err}")
 
-def dedup_by_id(gs):
-    seen = set(); out = []
-    for g in gs:
-        gid = str(g.get("id") or "")
-        if gid and gid in seen:
+
+# ===== Descarga y filtrado de juegos =========================================
+def fetch_games_for_user(username: str) -> List[Dict[str, Any]]:
+    """Descarga páginas del historial de un usuario y devuelve lista cruda de juegos."""
+    games: List[Dict[str, Any]] = []
+    for page in PAGES:
+        payload = {
+            "username": username,
+            "page": page,
+            "platform": PLATFORM,
+        }
+        data = _req(API, payload)
+        # La API acostumbra devolver {"data": [...]}
+        chunk = data.get("data") or []
+        if not isinstance(chunk, list):
             continue
-        if gid:
-            seen.add(gid)
-        out.append(g)
+        games.extend(chunk)
+    return games
+
+
+def filter_and_normalize_games(raw_games: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Filtra LEAGUE + fecha mínima. Normaliza tipos y campos clave."""
+    out: List[Dict[str, Any]] = []
+    for g in raw_games:
+        try:
+            if (g.get("game_mode") or "").upper() != MODE:
+                continue
+            dt = _parse_api_date(g.get("display_date", ""))
+            if not dt or dt < SINCE:
+                continue
+
+            home_res = (g.get("home_display_result") or "").upper()
+            away_res = (g.get("away_display_result") or "").upper()
+
+            # Normaliza estructura
+            out.append({
+                "id": str(g.get("id", "")),
+                "dt": dt,
+                "home_team": g.get("home_full_name") or "",
+                "away_team": g.get("away_full_name") or "",
+                "home_res": home_res,
+                "away_res": away_res,
+                "home_runs": _safe_int(g.get("home_runs"), 0),
+                "away_runs": _safe_int(g.get("away_runs"), 0),
+                "home_name": (g.get("home_name") or "").strip(),
+                "away_name": (g.get("away_name") or "").strip(),
+                "display_pitcher_info": g.get("display_pitcher_info") or "",
+            })
+        except Exception:
+            # ignora juego malformado
+            pass
     return out
 
-def norm_team(s: str) -> str:
-    return (s or "").strip().lower()
 
-def compute_team_record_for_user(username_exact: str, team_name: str):
-    # 1) Descargar p1–p2 del usuario y deduplicar
-    pages = []
-    for p in PAGES:
-        pages += fetch_page(username_exact, p)
-    pages = dedup_by_id(pages)
-
-    # 2) Filtrar: LEAGUE + fecha + que juegue ese equipo + rival válido
-    considered = []
-    for g in pages:
-        if (g.get("game_mode") or "").strip().upper() != MODE:
+def fetch_all_games_for_league() -> List[Dict[str, Any]]:
+    """Descarga y filtra todos los juegos de los usuarios de la liga."""
+    all_games: List[Dict[str, Any]] = []
+    for user, _team in LEAGUE_ORDER:
+        try:
+            raw = fetch_games_for_user(user)
+            all_games.extend(filter_and_normalize_games(raw))
+        except Exception:
+            # si un usuario falla, seguimos con los demás
             continue
-        d = parse_date(g.get("display_date",""))
-        if not d or d < SINCE:
+    return all_games
+
+
+# ===== Cómputo por equipo/usuario ============================================
+def compute_team_record_for_user(username_exact: str, team_name: str,
+                                 games: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Calcula W/L y puntos para el (usuario, equipo) dado, usando solo juegos LEAGUE >= SINCE.
+    Aplica un conteo simple a partir de home/away + result (W/L).
+    """
+    username_norm = username_exact.lower()
+
+    wins = 0
+    losses = 0
+
+    # Reglas extra (mercy/abandonos) opcionales:
+    mercy_bonus = 0
+    abandonos_penalty = 0
+
+    for g in games:
+        # detecta si el usuario participó (por nombre en home/away)
+        players_norm = {g.get("home_name", "").strip().lower(),
+                        g.get("away_name", "").strip().lower()}
+        if username_norm not in players_norm:
             continue
 
-        home = (g.get("home_full_name") or "").strip()
-        away = (g.get("away_full_name") or "").strip()
-        if norm_team(team_name) not in (norm_team(home), norm_team(away)):
-            continue
+        # ¿jugó como home o away?
+        is_home = (g.get("home_name", "").strip().lower() == username_norm)
 
-        # Filtro: ambos miembros o CPU + miembro
-        home_name_raw = g.get("home_name","")
-        away_name_raw = g.get("away_name","")
-        h_norm = normalize_user_for_compare(home_name_raw)
-        a_norm = normalize_user_for_compare(away_name_raw)
-        h_mem = h_norm in LEAGUE_USERS_NORM
-        a_mem = a_norm in LEAGUE_USERS_NORM
-        if not ( (h_mem and a_mem) or (is_cpu(home_name_raw) and a_mem) or (is_cpu(away_name_raw) and h_mem) ):
-            continue
-
-        considered.append(g)
-
-    # 3) Contar W/L
-    wins = losses = 0
-    detail_lines = []
-    for g in considered:
-        home = (g.get("home_full_name") or "").strip()
-        away = (g.get("away_full_name") or "").strip()
-        hr = (g.get("home_display_result") or "").strip().upper()
-        ar = (g.get("away_display_result") or "").strip().upper()
-        dt = g.get("display_date","")
-        if hr == "W":
-            win, lose = home, away
-        elif ar == "W":
-            win, lose = away, home
+        # Resultado en función de W/L del lado correspondiente
+        if is_home:
+            if g["home_res"] == "W":
+                wins += 1
+            elif g["home_res"] == "L":
+                losses += 1
         else:
-            continue
+            if g["away_res"] == "W":
+                wins += 1
+            elif g["away_res"] == "L":
+                losses += 1
 
-        if norm_team(win) == norm_team(team_name):
-            wins += 1
-        elif norm_team(lose) == norm_team(team_name):
-            losses += 1
+        # (Opcional) Leer pistas para mercy/abandonos si las marcas en pitcher_info o anotaciones.
+        # Aquí solo dejamos los acumuladores listos.
+        # if "MER" in (g["display_pitcher_info"] or ""): mercy_bonus += 1
+        # if "ABANDONO" in (g["display_pitcher_info"] or ""): abandonos_penalty += 1
 
-        if PRINT_DETAILS:
-            detail_lines.append(f"{dt}  {away} @ {home} -> ganó {win}")
+    # Ajustes (por ahora identidades)
+    wins_adj = wins
+    losses_adj = losses
 
-    # 4) Ajuste algebraico del equipo (W/L)
-    adj_w, adj_l = TEAM_RECORD_ADJUSTMENTS.get(team_name, (0, 0))
-    wins_adj, losses_adj = wins + adj_w, losses + adj_l
-
-    # 5) Puntos y métricas de tabla
-scheduled = SCHEDULED_GAMES
-played = max(wins_adj + losses_adj, 0)
-remaining = max(scheduled - played, 0)
+    # 5) Puntos y métricas de tabla (CORREGIDO: sin tab extra)
     points_base = 3 * wins_adj + 2 * losses_adj
+    points = points_base + mercy_bonus - abandonos_penalty
 
-    # 6) Ajuste manual de PUNTOS (desconexiones, sanciones, etc.)
-    pts_extra, pts_reason = TEAM_POINT_ADJUSTMENTS.get(team_name, (0, ""))
-    points_final = points_base + pts_extra
+    scheduled = SCHEDULED_GAMES
+    played = max(wins_adj + losses_adj, 0)
+    remaining = max(scheduled - played, 0)
 
     return {
         "user": username_exact,
@@ -192,174 +220,58 @@ remaining = max(scheduled - played, 0)
         "played": played,
         "wins": wins_adj,
         "losses": losses_adj,
-        "remaining": remaining,
-        "points": points_final,      # << lo que se usa para ordenar y mostrar
-        "points_base": points_base,  # info útil por si quieres comparar
-        "points_extra": pts_extra,   # ej: -1
-        "points_reason": pts_reason, # ej: "Desconexión vs Blue Jays"
-        "detail": detail_lines,
+        "to_play": remaining,
+        "points": points,
+        "mercy_bonus": mercy_bonus,
+        "abandonos_penalty": abandonos_penalty,
     }
 
-def main():
-    take = len(LEAGUE_ORDER) if STOP_AFTER_N is None else min(STOP_AFTER_N, len(LEAGUE_ORDER))
-    rows = []
-    print(f"Procesando {take} equipos (páginas {PAGES})...\n")
-    for i, (user, team) in enumerate(LEAGUE_ORDER[:take], start=1):
-        print(f"[{i}/{take}] {team} ({user})...")
-        row = compute_team_record_for_user(user, team)
-        rows.append(row)
-        # Muestra Pts y, si hay ajuste, indícalo
-        adj_note = f" (ajuste pts {row['points_extra']}: {row['points_reason']})" if row["points_extra"] else ""
-        print(f"  => {row['team']}: {row['wins']}-{row['losses']} (Pts {row['points']}){adj_note}\n")
 
-    # Orden por puntos desc; desempates: W desc, L asc
-    rows.sort(key=lambda r: (-r["points"], -r["wins"], r["losses"]))
+# ===== Armado de tabla y ordenamiento ========================================
+def build_table_rows(all_games: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Construye filas de la tabla para todos los (usuario, equipo) de LEAGUE_ORDER."""
+    rows: List[Dict[str, Any]] = []
 
-    # Print tabla con posiciones
-    print("\nTabla de posiciones")
-    print("Pos | Equipo            | Jugador         |  Prog({SCHEDULED_GAMES} |  JJ |  W |  L | P.Jugar | Pts")
-    print("----+-------------------+-----------------+------+-----+----+----+---------+----")
-    for pos, r in enumerate(rows, start=1):
-        print(f"{pos:>3} | {r['team']:<19} | {r['user']:<15} | {r['scheduled']:>4} | {r['played']:>3} | "
-              f"{r['wins']:>2} | {r['losses']:>2} | {r['remaining']:>7} | {r['points']:>3}")
+    for user, team in LEAGUE_ORDER:
+        r = compute_team_record_for_user(user, team, all_games)
+        rows.append(r)
 
-    # Notas de ajustes de puntos (si existen)
-    notes = [r for r in rows if r["points_extra"]]
-    if notes:
-        print("\nNotas de puntos (ajustes manuales):")
-        for r in notes:
-            signo = "+" if r["points_extra"] > 0 else ""
-            print(f" - {r['team']}: {signo}{r['points_extra']} — {r['points_reason']}")
-
-    print(f"\nÚltima actualización: {datetime.now():%Y-%m-%d %H:%M:%S}")
-
-if __name__ == "__main__":
-    main()
-# ====== AÑADIR AL FINAL DE standings_cascade_points_desc.py ======
-from zoneinfo import ZoneInfo
-from datetime import datetime
-
-# ==============================
-# Compatibilidad: filas completas
-# ==============================
-def compute_rows():
-    """
-    Devuelve la lista completa de filas de la tabla.
-    Intenta detectar una función por-equipo existente.
-    """
-    # intenta varios nombres típicos que puedas tener en tu módulo
-    func = globals().get("compute_team_record_for_user") \
-        or globals().get("compute_team_record") \
-        or globals().get("build_team_row") \
-        or globals().get("team_row_for_user")
-
-    if not func:
-        raise RuntimeError(
-            "No encuentro una función para construir filas por equipo. "
-            "Define compute_team_record_for_user(user, team) o compute_team_record(user, team)."
-        )
-
-    if "LEAGUE_ORDER" not in globals():
-        raise RuntimeError("LEAGUE_ORDER no existe en standings_cascade_points_desc.py")
-
-    rows = []
-    for user_exact, team_name in LEAGUE_ORDER:
-        rows.append(func(user_exact, team_name))
-
-    # Orden habitual
-    rows.sort(key=lambda r: (-r.get("points", 0), -r.get("wins", 0), r.get("losses", 0)))
+    # Orden: W (desc), JJ (desc), L (asc)
+    rows.sort(key=lambda r: (-r["wins"], -r["played"], r["losses"], r["team"]))
+    # Numeración de posiciones
+    for i, r in enumerate(rows, start=1):
+        r["pos"] = i
     return rows
 
 
-# -------------------------------
-# Juegos jugados HOY (Chile)
-# -------------------------------
-# -------------------------------
-# Juegos jugados HOY (Chile) - FIX TZ + DEDUP EXTRA
-# -------------------------------
-from zoneinfo import ZoneInfo
-from datetime import datetime
-
-def games_played_today_scl():
-    """
-    Lista juegos del DÍA (America/Santiago) en formato:
-      'Yankees 1 - Brewers 2  - 30-08-2025 - 3:28 pm'
-    Arreglos:
-      - Si la fecha viene sin tz, se asume UTC y se convierte a America/Santiago.
-      - Deduplicación por id y por una clave canónica (home, away, hr, ar, yyyy-mm-dd HH:MM).
-      - Se requiere que AMBOS participantes pertenezcan a la liga.
-    """
-    tz_scl = ZoneInfo("America/Santiago")
-    tz_utc = ZoneInfo("UTC")
-    today_local = datetime.now(tz_scl).date()
-
-    # Traer páginas p1 y p2 de todos los usuarios de la liga
-    all_pages = []
-    for username_exact, _team in LEAGUE_ORDER:
-        for p in PAGES:
-            all_pages += fetch_page(username_exact, p)
-
-    # Deduplicadores
-    seen_ids = set()
-    seen_keys = set()  # (home, away, hr, ar, 'YYYY-MM-DD HH:MM')
-    items = []
-
-    for g in dedup_by_id(all_pages):
-        if (g.get("game_mode") or "").strip().upper() != MODE:
-            continue
-
-        d = parse_date(g.get("display_date", ""))
-        if not d:
-            continue
-
-        # Asumir UTC si es naive, luego convertir a SCL
-        if d.tzinfo is None:
-            d = d.replace(tzinfo=tz_utc)
-        d_local = d.astimezone(tz_scl)
-
-        if d_local.date() != today_local:
-            continue
-
-        # Ambos jugadores deben pertenecer a la liga
-        home_name_raw = (g.get("home_name") or "")
-        away_name_raw = (g.get("away_name") or "")
-        h_norm = normalize_user_for_compare(home_name_raw)
-        a_norm = normalize_user_for_compare(away_name_raw)
-        if not (h_norm in LEAGUE_USERS_NORM and a_norm in LEAGUE_USERS_NORM):
-            continue
-
-        # Dedup por id
-        gid = str(g.get("id") or "")
-        if gid and gid in seen_ids:
-            continue
-
-        home = (g.get("home_full_name") or "").strip()
-        away = (g.get("away_full_name") or "").strip()
-        hr = str(g.get("home_runs") or "0")
-        ar = str(g.get("away_runs") or "0")
-
-        # Clave canónica por minuto (YYYY-MM-DD HH:MM)
-        minute_key = d_local.strftime("%Y-%m-%d %H:%M")
-        canon_key = (home, away, hr, ar, minute_key)
-        if canon_key in seen_keys:
-            # Ya mostramos este juego con otra 'id' duplicada
-            continue
-
-        # Marcar vistos
-        if gid:
-            seen_ids.add(gid)
-        seen_keys.add(canon_key)
-
-        # Formato de salida
-        try:
-            fecha_hora = d_local.strftime("%d-%m-%Y - %-I:%M %p").lower()
-        except Exception:
-            fecha_hora = d_local.strftime("%d-%m-%Y - %#I:%M %p").lower()
-
-        items.append((d_local, f"{home} {hr} - {away} {ar}  - {fecha_hora} (hora Chile)"))
-
-    items.sort(key=lambda x: x[0])
-    return [s for _, s in items]
+def get_table_data() -> List[Dict[str, Any]]:
+    """API principal para app.py: devuelve las filas ya listas/ordenadas."""
+    games = fetch_all_games_for_league()
+    return build_table_rows(games)
 
 
-# ====== FIN DEL BLOQUE AÑADIDO ======
+# ===== Pretty print por consola (debug local) =================================
+def _print_table(rows: List[Dict[str, Any]]) -> None:
+    print("\nTabla de posiciones")
+    print(f"Pos | Equipo            | Jugador         | Prog({SCHEDULED_GAMES}) |  JJ |  W |  L | P.Jugar | Pts")
+    print("----+-------------------+-----------------+-------------------------+-----+----+----+---------+----")
+    for r in rows:
+        print(
+            f"{r['pos']:>3} | "
+            f"{r['team'][:19]:<19} | "
+            f"{r['user'][:15]:<15} | "
+            f"{r['scheduled']:>9}               | "
+            f"{r['played']:>3} | "
+            f"{r['wins']:>2} | "
+            f"{r['losses']:>2} | "
+            f"{r['to_play']:>7} | "
+            f"{r['points']:>3}"
+        )
+
+
+if __name__ == "__main__":
+    # Permite probar rápido: imprime tabla en consola
+    if not LEAGUE_ORDER:
+        print("ATENCIÓN: LEAGUE_ORDER está vacío. Rellena tus (usuario, equipo) antes de ejecutar.")
+    rows = get_table_data() if LEAGUE_ORDER else []
+    _print_table(rows)
