@@ -1,6 +1,6 @@
 # standings_cascade_points.py
 # Tabla de posiciones (2 páginas por jugador) con columnas:
-# Pos | Equipo | Jugador | Prog(12) | JJ | W | L | Por jugar | Pts
+# Pos | Equipo | Jugador | Prog(13) | JJ | W | L | Por jugar | Pts
 # Reglas: LEAGUE + fecha, filtro (ambos miembros) o (CPU + miembro), dedup por id, ajustes algebraicos.
 # Orden: por puntos (desc). Empates: por W (desc), luego L (asc).
 
@@ -57,9 +57,11 @@ TEAM_POINT_ADJUSTMENTS = {
 }
 
 # ===== Miembros de liga (para el filtro de rival) =====
-    #LEAGUE_USERS = {u for (u, _t) in LEAGUE_ORDER}
-# Si corresponde, agrega extras manuales:
-    #LEAGUE_USERS.update({"AiramReynoso_"})  # quítalo si no es parte
+LEAGUE_USERS = {u for (u, _t) in LEAGUE_ORDER}
+# Agrega alias/equivalencias si corresponde a esta liga:
+LEAGUE_USERS.update({"AiramReynoso_", "Yosoyreynoso_"})
+
+LEAGUE_USERS_NORM = {u.lower() for u in LEAGUE_USERS}
 
 # ===== Utilidades =====
 BXX_RE = re.compile(r"\^(b\d+)\^", flags=re.IGNORECASE)
@@ -171,7 +173,7 @@ def compute_team_record_for_user(username_exact: str, team_name: str):
     wins_adj, losses_adj = wins + adj_w, losses + adj_l
 
     # 5) Puntos y métricas de tabla
-    scheduled = 12
+    scheduled = 13
     played = max(wins_adj + losses_adj, 0)
     remaining = max(scheduled - played, 0)
     points_base = 3 * wins_adj + 2 * losses_adj
