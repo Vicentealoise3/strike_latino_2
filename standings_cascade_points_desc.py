@@ -27,7 +27,7 @@ MODE = "LEAGUE"
 SINCE = datetime(2025, 8, 30)
 
 # NUEVO: total de juegos programados por equipo
-SCHEDULED_GAMES = 12
+SCHEDULED_GAMES = 13
 
 # Páginas a pedir (por cada usuario)
 PAGES = (1, 2)
@@ -40,10 +40,21 @@ SLEEP_BETWEEN = 0.3  # descanso suave entre requests
 # ===== Liga (RELLENAR con tu liga actual) ====================================
 # IMPORTANTE: Rellena LEAGUE_ORDER con tu mapeo (usuario PSN, Equipo MLB)
 # Ejemplos de formato, borra/edita a tu gusto:
-LEAGUE_ORDER: List[Tuple[str, str]] = [
-    # ("usuario1", "Astros"),
-    # ("usuario2", "Rays"),
-    # ...
+LEAGUE_ORDER = [
+    ("THELSURICATO", "Mets"),
+    ("machado_seba-03", "Reds"),
+    ("zancudo99", "Rangers"),
+    ("vicentealoise", "Brewers"),
+    ("Solbracho", "Tigers"),
+    ("WILZULIA", "Royals"),
+    ("Daviddiaz030425", "Guardians"),
+    ("Juanchojs28", "Giants"),
+    ("Dev Read", "Marlins"),
+    ("Bufon3-0", "Athletics"),
+    ("edwar13-21", "Blue Jays"),
+    ("mrguerrillas", "Pirates"),
+    ("Diamondmanager", "Astros"),
+    ("Tu_Pauta2000", "Braves"),
 ]
 
 # Aliases opcionales para normalizar jugadores con variación de nombre
