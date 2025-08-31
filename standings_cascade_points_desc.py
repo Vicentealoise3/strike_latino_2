@@ -57,9 +57,12 @@ TEAM_POINT_ADJUSTMENTS = {
 }
 
 # ===== Miembros de liga (para el filtro de rival) =====
-    #LEAGUE_USERS = {u for (u, _t) in LEAGUE_ORDER}
-# Si corresponde, agrega extras manuales:
-    #LEAGUE_USERS.update({"AiramReynoso_"})  # quítalo si no es parte
+LEAGUE_USERS = {u for (u, _t) in LEAGUE_ORDER}
+# Agrega alias/equivalencias si corresponde a esta liga:
+LEAGUE_USERS.update({"AiramReynoso_", "Yosoyreynoso_"})
+
+LEAGUE_USERS_NORM = {u.lower() for u in LEAGUE_USERS}
+
 
 # ===== Utilidades =====
 BXX_RE = re.compile(r"\^(b\d+)\^", flags=re.IGNORECASE)
