@@ -4,15 +4,72 @@
 # Reglas: LEAGUE + fecha, filtro (ambos miembros) o (CPU + miembro), dedup por id, ajustes algebraicos.
 # Orden: por puntos (desc). Empates: por W (desc), luego L (asc).
 
-import requests, time, re
+import requests, time, re, os, json
 from datetime import datetime
-
 # ===== Config general =====
+
+# ===== MODO DE EJECUCIÓN (switch) =====
+# Valores posibles: "DEBUG" o "ONLINE"
+MODE = "ONLINE"  # ← déjalo en DEBUG para que se comporte igual que ahora
+
+CFG = {
+    "DEBUG": dict(
+        PRINT_DETAILS=False,          # igual que ahora
+        PRINT_CAPTURE_SUMMARY=True,   # imprime resumen por equipo
+        PRINT_CAPTURE_LIST=False,     # NO lista juego por juego
+        DUMP_ENABLED=True,            # genera JSON en carpeta out/
+        STOP_AFTER_N=None,            # procesa todos
+        DAY_WINDOW_MODE="calendar",   # "hoy" = día calendario Chile (00:00–23:59)
+    ),
+    "ONLINE": dict(
+        PRINT_DETAILS=False,          # silencioso en prod
+        PRINT_CAPTURE_SUMMARY=False,  # sin resúmenes
+        PRINT_CAPTURE_LIST=False,     # sin listado
+        DUMP_ENABLED=False,           # sin JSONs
+        STOP_AFTER_N=None,            # todos
+        DAY_WINDOW_MODE="sports",     # "hoy" = 06:00–05:59 (día deportivo Chile)
+    ),
+}
+
+# === Aplicar la config del modo seleccionado ===
+conf = CFG.get(MODE, CFG["DEBUG"])
+PRINT_DETAILS = conf["PRINT_DETAILS"]
+# Si ya tenías estas variables definidas arriba, estas líneas las sobreescriben según el modo:
+try:
+    PRINT_CAPTURE_SUMMARY
+except NameError:
+    PRINT_CAPTURE_SUMMARY = conf["PRINT_CAPTURE_SUMMARY"]
+else:
+    PRINT_CAPTURE_SUMMARY = conf["PRINT_CAPTURE_SUMMARY"]
+
+try:
+    PRINT_CAPTURE_LIST
+except NameError:
+    PRINT_CAPTURE_LIST = conf["PRINT_CAPTURE_LIST"]
+else:
+    PRINT_CAPTURE_LIST = conf["PRINT_CAPTURE_LIST"]
+
+try:
+    DUMP_ENABLED
+except NameError:
+    DUMP_ENABLED = conf["DUMP_ENABLED"]
+else:
+    DUMP_ENABLED = conf["DUMP_ENABLED"]
+
+try:
+    STOP_AFTER_N
+except NameError:
+    STOP_AFTER_N = conf["STOP_AFTER_N"]
+else:
+    STOP_AFTER_N = conf["STOP_AFTER_N"]
+
+DAY_WINDOW_MODE = conf["DAY_WINDOW_MODE"]  # "calendar" o "sports"
+
 API = "https://mlb25.theshow.com/apis/game_history.json"
 PLATFORM = "psn"
 MODE = "LEAGUE"
 SINCE = datetime(2025, 8, 30)
-PAGES = (1, 2)          # <-- SOLO p1 y p2, como validaste
+PAGES = (1, 2, 3)          # <-- SOLO p1 y p2, como validaste
 TIMEOUT = 20
 RETRIES = 2
 
@@ -22,13 +79,19 @@ PRINT_DETAILS = False
 # Procesar solo los primeros N para ir validando en cascada (None = todos)
 STOP_AFTER_N = None
 
+# === Capturas / dumps ===
+DUMP_ENABLED = True
+DUMP_DIR = "out"
+PRINT_CAPTURE_SUMMARY = True   # imprime resumen capturas por equipo
+PRINT_CAPTURE_LIST = False     # lista cada juego capturado (puede ser muy verboso)
+
 # ===== Liga (username EXACTO → equipo) =====
 LEAGUE_ORDER = [
     ("THELSURICATO", "Mets"),
     ("machado_seba-03", "Reds"),
     ("zancudo99", "Rangers"),
-    ("vicentealoise", "Brewers"),
-    ("Solbracho", "Tigers"),
+    ("havanavcr10", "Brewers"),
+    ("Solbbracho", "Tigers"),
     ("WILZULIA", "Royals"),
     ("Daviddiaz030425", "Guardians"),
     ("Juanchojs28", "Giants"),
@@ -40,36 +103,56 @@ LEAGUE_ORDER = [
     ("Tu_Pauta2000", "Braves"),
 ]
 
+# ====== IDs alternativos por participante (para sumar sin duplicar) ======
+# Clave = username principal EXACTO en LEAGUE_ORDER; Valor = lista de cuentas alternas
+FETCH_ALIASES = {
+    # ejemplo real:
+    "Tu_Pauta2000": ["Lachi_1991"],  # Braves puede aparecer con esta otra cuenta
+    # agrega más si hace falta:
+    # "OtroPrincipal": ["Alias1", "Alias2"],
+}
+
 # ===== Ajustes algebraicos por equipo (resets W/L) =====
 TEAM_RECORD_ADJUSTMENTS = {
-       # "Blue Jays": (0, -1),
+    # "Blue Jays": (0, -1),
     # agrega más si hace falta
 }
 
 # ===== Ajustes manuales de PUNTOS (desconexiones, sanciones, bonificaciones) =====
 # Formato: "Equipo": (ajuste_en_puntos, "razón del ajuste")
 TEAM_POINT_ADJUSTMENTS = {
-        #"Padres": (-1, "Desconexión vs Blue Jays"),
-    # ejemplo de bonificación futura:
+    # "Padres": (-1, "Desconexión vs Blue Jays"),
     # "Cubs": (+1, "Bonificación fair play"),
 }
 
 # ===== Miembros de liga (para el filtro de rival) =====
+# Incluye principales + alias para que NINGÚN partido válido se descarte por “no miembro”
 LEAGUE_USERS = {u for (u, _t) in LEAGUE_ORDER}
-# Agrega alias/equivalencias si corresponde a esta liga:
+for base, alts in FETCH_ALIASES.items():
+    LEAGUE_USERS.add(base)
+    LEAGUE_USERS.update(alts)
+# Agrega alias/equivalencias históricas si corresponde a esta liga:
 LEAGUE_USERS.update({"AiramReynoso_", "Yosoyreynoso_"})
-
 LEAGUE_USERS_NORM = {u.lower() for u in LEAGUE_USERS}
-
 
 # ===== Utilidades =====
 BXX_RE = re.compile(r"\^(b\d+)\^", flags=re.IGNORECASE)
 
+def _safe_name(s: str) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", s or "")
+
+def _dump_json(filename: str, data):
+    if not DUMP_ENABLED:
+        return
+    os.makedirs(DUMP_DIR, exist_ok=True)
+    path = os.path.join(DUMP_DIR, filename)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    return path
+
 def normalize_user_for_compare(raw: str) -> str:
     if not raw: return ""
     return BXX_RE.sub("", raw).strip().lower()
-
-LEAGUE_USERS_NORM = {u.lower() for u in LEAGUE_USERS}
 
 def is_cpu(raw: str) -> bool:
     return normalize_user_for_compare(raw) == "cpu"
@@ -111,15 +194,21 @@ def norm_team(s: str) -> str:
     return (s or "").strip().lower()
 
 def compute_team_record_for_user(username_exact: str, team_name: str):
-    # 1) Descargar p1–p2 del usuario y deduplicar
-    pages = []
-    for p in PAGES:
-        pages += fetch_page(username_exact, p)
-    pages = dedup_by_id(pages)
+    # 1) Descargar páginas del usuario PRINCIPAL y de sus ALIAS; luego deduplicar globalmente por id
+    pages_raw = []
+    usernames_to_fetch = [username_exact] + FETCH_ALIASES.get(username_exact, [])
+    for uname in usernames_to_fetch:
+        for p in PAGES:
+            page_items = fetch_page(uname, p)
+            pages_raw += page_items
+            if PRINT_CAPTURE_LIST:
+                for g in page_items:
+                    print(f"    [cap] {uname} p{p} id={g.get('id')}  {g.get('away_full_name','')} @ {g.get('home_full_name','')}  {g.get('display_date','')}")
+    pages_dedup = dedup_by_id(pages_raw)
 
     # 2) Filtrar: LEAGUE + fecha + que juegue ese equipo + rival válido
     considered = []
-    for g in pages:
+    for g in pages_dedup:
         if (g.get("game_mode") or "").strip().upper() != MODE:
             continue
         d = parse_date(g.get("display_date",""))
@@ -142,6 +231,15 @@ def compute_team_record_for_user(username_exact: str, team_name: str):
             continue
 
         considered.append(g)
+
+    # === Captura/dumps por usuario principal ===
+    if PRINT_CAPTURE_SUMMARY:
+        print(f"    [capturas] {team_name} ({username_exact}): raw={len(pages_raw)}  dedup={len(pages_dedup)}  considerados={len(considered)}")
+    if DUMP_ENABLED:
+        base = _safe_name(username_exact)
+        _dump_json(f"{base}_raw.json", pages_raw)
+        _dump_json(f"{base}_dedup.json", pages_dedup)
+        _dump_json(f"{base}_considered.json", considered)
 
     # 3) Contar W/L
     wins = losses = 0
@@ -197,6 +295,8 @@ def compute_team_record_for_user(username_exact: str, team_name: str):
     }
 
 def main():
+    os.makedirs(DUMP_DIR, exist_ok=True)
+
     take = len(LEAGUE_ORDER) if STOP_AFTER_N is None else min(STOP_AFTER_N, len(LEAGUE_ORDER))
     rows = []
     print(f"Procesando {take} equipos (páginas {PAGES})...\n")
@@ -210,6 +310,9 @@ def main():
 
     # Orden por puntos desc; desempates: W desc, L asc
     rows.sort(key=lambda r: (-r["points"], -r["wins"], r["losses"]))
+
+    # Dump standings
+    _dump_json("standings.json", rows)
 
     # Print tabla con posiciones
     print("\nTabla de posiciones")
@@ -227,10 +330,35 @@ def main():
             signo = "+" if r["points_extra"] > 0 else ""
             print(f" - {r['team']}: {signo}{r['points_extra']} — {r['points_reason']}")
 
+    # Reporte de juegos de HOY (Chile) + dump
+    try:
+        games_today = games_played_today_scl()
+    except Exception as e:
+        games_today = []
+        print(f"\n[WARN] games_played_today_scl falló: {e}")
+
+    _dump_json("games_today.json", {
+        "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "items": games_today
+    })
+
+    print("\nJuegos jugados HOY (hora Chile)")
+    if not games_today:
+        print(" — No hay registros hoy —")
+    else:
+        for i, s in enumerate(games_today, 1):
+            print(f"{i:>2}- {s}")
+
     print(f"\nÚltima actualización: {datetime.now():%Y-%m-%d %H:%M:%S}")
+    print(f"JSON generados en: .\\{DUMP_DIR}\\")
+    print("  - standings.json")
+    print("  - games_today.json")
+    print("  - <usuario>_raw.json / _dedup.json / _considered.json")
 
 if __name__ == "__main__":
     main()
+
+
 # ====== AÑADIR AL FINAL DE standings_cascade_points_desc.py ======
 from zoneinfo import ZoneInfo
 from datetime import datetime
@@ -243,7 +371,6 @@ def compute_rows():
     Devuelve la lista completa de filas de la tabla.
     Intenta detectar una función por-equipo existente.
     """
-    # intenta varios nombres típicos que puedas tener en tu módulo
     func = globals().get("compute_team_record_for_user") \
         or globals().get("compute_team_record") \
         or globals().get("build_team_row") \
@@ -262,28 +389,21 @@ def compute_rows():
     for user_exact, team_name in LEAGUE_ORDER:
         rows.append(func(user_exact, team_name))
 
-    # Orden habitual
     rows.sort(key=lambda r: (-r.get("points", 0), -r.get("wins", 0), r.get("losses", 0)))
     return rows
 
 
 # -------------------------------
-# Juegos jugados HOY (Chile)
-# -------------------------------
-# -------------------------------
 # Juegos jugados HOY (Chile) - FIX TZ + DEDUP EXTRA
 # -------------------------------
-from zoneinfo import ZoneInfo
-from datetime import datetime
-
 def games_played_today_scl():
     """
     Lista juegos del DÍA (America/Santiago) en formato:
-      'Yankees 1 - Brewers 2  - 30-08-2025 - 3:28 pm'
+      'Yankees 1 - Brewers 2  - 30-08-2025 - 3:28 pm (hora Chile)'
     Arreglos:
       - Si la fecha viene sin tz, se asume UTC y se convierte a America/Santiago.
       - Deduplicación por id y por una clave canónica (home, away, hr, ar, yyyy-mm-dd HH:MM).
-      - Se requiere que AMBOS participantes pertenezcan a la liga.
+      - Se requiere que AMBOS participantes pertenezcan a la liga, o CPU + miembro.
     """
     tz_scl = ZoneInfo("America/Santiago")
     tz_utc = ZoneInfo("UTC")
@@ -316,12 +436,16 @@ def games_played_today_scl():
         if d_local.date() != today_local:
             continue
 
-        # Ambos jugadores deben pertenecer a la liga
+        # Ambos jugadores deben pertenecer a la liga, o CPU + miembro
         home_name_raw = (g.get("home_name") or "")
         away_name_raw = (g.get("away_name") or "")
         h_norm = normalize_user_for_compare(home_name_raw)
         a_norm = normalize_user_for_compare(away_name_raw)
-        if not (h_norm in LEAGUE_USERS_NORM and a_norm in LEAGUE_USERS_NORM):
+
+        h_mem = h_norm in LEAGUE_USERS_NORM
+        a_mem = a_norm in LEAGUE_USERS_NORM
+
+        if not ((h_mem and a_mem) or (is_cpu(home_name_raw) and a_mem) or (is_cpu(away_name_raw) and h_mem)):
             continue
 
         # Dedup por id
@@ -357,5 +481,4 @@ def games_played_today_scl():
     items.sort(key=lambda x: x[0])
     return [s for _, s in items]
 
-
-# ====== FIN DEL BLOQUE AÑADIDO ======
+# ====== FIN DEL BLOQUE ======
